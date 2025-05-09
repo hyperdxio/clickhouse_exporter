@@ -9,14 +9,9 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unicode"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/rs/zerolog/log"
-)
-
-const (
-	namespace = "clickhouse" // For Prometheus metrics.
 )
 
 // Exporter collects clickhouse stats from the given URI and exports them using
@@ -65,8 +60,8 @@ func NewExporter(uri url.URL, insecure bool, user, password string) *Exporter {
 		partsURI:        partsURI.String(),
 		disksMetricURI:  disksMetricURI.String(),
 		scrapeFailures: prometheus.NewCounter(prometheus.CounterOpts{
-			Namespace: namespace,
-			Name:      "exporter_scrape_failures_total",
+			Namespace: "",
+			Name:      "ClickHouseExporter_ScrapeFailuresTotal",
 			Help:      "Number of errors while scraping clickhouse.",
 		}),
 		client: &http.Client{
@@ -110,8 +105,8 @@ func (e *Exporter) collect(ch chan<- prometheus.Metric) error {
 
 	for _, m := range metrics {
 		newMetric := prometheus.NewGaugeVec(prometheus.GaugeOpts{
-			Namespace: namespace,
-			Name:      metricName(m.key),
+			Namespace: "",
+			Name:      "ClickHouseMetrics_" + metricName(m.key),
 			Help:      "Number of " + m.key + " currently processed",
 		}, []string{}).WithLabelValues()
 		newMetric.Set(m.value)
@@ -125,8 +120,8 @@ func (e *Exporter) collect(ch chan<- prometheus.Metric) error {
 
 	for _, am := range asyncMetrics {
 		newMetric := prometheus.NewGaugeVec(prometheus.GaugeOpts{
-			Namespace: namespace,
-			Name:      metricName(am.key),
+			Namespace: "",
+			Name:      "ClickHouseAsyncMetrics_" + metricName(am.key),
 			Help:      "Number of " + am.key + " async processed",
 		}, []string{}).WithLabelValues()
 		newMetric.Set(am.value)
@@ -141,7 +136,7 @@ func (e *Exporter) collect(ch chan<- prometheus.Metric) error {
 	for _, ev := range events {
 		newMetric, _ := prometheus.NewConstMetric(
 			prometheus.NewDesc(
-				namespace+"_"+metricName(ev.key)+"_total",
+				"ClickHouseEvents_"+metricName(ev.key)+"_total",
 				"Number of "+ev.key+" total processed", []string{}, nil),
 			prometheus.CounterValue, float64(ev.value))
 		ch <- newMetric
@@ -154,24 +149,24 @@ func (e *Exporter) collect(ch chan<- prometheus.Metric) error {
 
 	for _, part := range parts {
 		newBytesMetric := prometheus.NewGaugeVec(prometheus.GaugeOpts{
-			Namespace: namespace,
-			Name:      "table_parts_bytes",
+			Namespace: "",
+			Name:      "ClickHouseParts_TablePartsBytes",
 			Help:      "Table size in bytes",
 		}, []string{"database", "table"}).WithLabelValues(part.database, part.table)
 		newBytesMetric.Set(float64(part.bytes))
 		newBytesMetric.Collect(ch)
 
 		newCountMetric := prometheus.NewGaugeVec(prometheus.GaugeOpts{
-			Namespace: namespace,
-			Name:      "table_parts_count",
+			Namespace: "",
+			Name:      "ClickHouseParts_TablePartsCount",
 			Help:      "Number of parts of the table",
 		}, []string{"database", "table"}).WithLabelValues(part.database, part.table)
 		newCountMetric.Set(float64(part.parts))
 		newCountMetric.Collect(ch)
 
 		newRowsMetric := prometheus.NewGaugeVec(prometheus.GaugeOpts{
-			Namespace: namespace,
-			Name:      "table_parts_rows",
+			Namespace: "",
+			Name:      "ClickHouseParts_TablePartsRows",
 			Help:      "Number of rows in the table",
 		}, []string{"database", "table"}).WithLabelValues(part.database, part.table)
 		newRowsMetric.Set(float64(part.rows))
@@ -185,16 +180,16 @@ func (e *Exporter) collect(ch chan<- prometheus.Metric) error {
 
 	for _, dm := range disksMetrics {
 		newFreeSpaceMetric := prometheus.NewGaugeVec(prometheus.GaugeOpts{
-			Namespace: namespace,
-			Name:      "free_space_in_bytes",
+			Namespace: "",
+			Name:      "ClickHouseDisks_FreeSpaceInBytes",
 			Help:      "Disks free_space_in_bytes capacity",
 		}, []string{"disk"}).WithLabelValues(dm.disk)
 		newFreeSpaceMetric.Set(dm.freeSpace)
 		newFreeSpaceMetric.Collect(ch)
 
 		newTotalSpaceMetric := prometheus.NewGaugeVec(prometheus.GaugeOpts{
-			Namespace: namespace,
-			Name:      "total_space_in_bytes",
+			Namespace: "",
+			Name:      "ClickHouseDisks_TotalSpaceInBytes",
 			Help:      "Disks total_space_in_bytes capacity",
 		}, []string{"disk"}).WithLabelValues(dm.disk)
 		newTotalSpaceMetric.Set(dm.totalSpace)
@@ -384,7 +379,7 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 
 	ch <- prometheus.MustNewConstMetric(
 		prometheus.NewDesc(
-			prometheus.BuildFQName(namespace, "", "up"),
+			prometheus.BuildFQName("", "", "up"),
 			"Was the last query of ClickHouse successful.",
 			nil, nil,
 		),
@@ -394,25 +389,20 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 }
 
 func metricName(in string) string {
-	out := toSnake(in)
-	return strings.Replace(out, ".", "_", -1)
-}
+	// Split by dots and underscores
+	parts := strings.FieldsFunc(in, func(r rune) bool {
+		return r == '.' || r == '_' || r == '-'
+	})
 
-// toSnake convert the given string to snake case following the Golang format:
-// acronyms are converted to lower-case and preceded by an underscore.
-func toSnake(in string) string {
-	runes := []rune(in)
-	length := len(runes)
-
-	var out []rune
-	for i := 0; i < length; i++ {
-		if i > 0 && unicode.IsUpper(runes[i]) && ((i+1 < length && unicode.IsLower(runes[i+1])) || unicode.IsLower(runes[i-1])) {
-			out = append(out, '_')
+	// Capitalize each part
+	for i, part := range parts {
+		if len(part) > 0 {
+			parts[i] = strings.ToUpper(part[:1]) + part[1:]
 		}
-		out = append(out, unicode.ToLower(runes[i]))
 	}
 
-	return string(out)
+	// Join with underscore
+	return strings.Join(parts, "_")
 }
 
 // check interface
