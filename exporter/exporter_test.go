@@ -62,3 +62,48 @@ func TestParseNumber(t *testing.T) {
 		}
 	}
 }
+
+func TestToClickHouseMetricsFormat(t *testing.T) {
+	type testCase struct {
+		in     string
+		source MetricSource
+		out    string
+	}
+
+	const namespace = "clickhouse"
+	testCases := []testCase{
+		// System metrics
+		{in: "clickhouse_disk_s3_no_such_key_errors", source: MetricSourceSystem, out: "ClickHouseMetrics_DiskS3NoSuchKeyErrors"},
+		{in: "clickhouse_http_connections", source: MetricSourceSystem, out: "ClickHouseMetrics_HTTPConnections"},
+		{in: "disk_s3_no_such_key_errors", source: MetricSourceSystem, out: "ClickHouseMetrics_DiskS3NoSuchKeyErrors"},
+		{in: "memory_usage", source: MetricSourceSystem, out: "ClickHouseMetrics_MemoryUsage"},
+		{in: "merge_tree_data_select_executor_threads_active", source: MetricSourceSystem, out: "ClickHouseMetrics_MergeTreeBackgroundExecutorThreadsActive"},
+
+		// Async metrics
+		{in: "clickhouse_tcp_threads", source: MetricSourceAsync, out: "ClickHouseAsyncMetrics_TCPThreads"},
+		{in: "clickhouse_tcp_connection", source: MetricSourceSystem, out: "ClickHouseMetrics_TCPConnection"},
+		{in: "os_idle_time", source: MetricSourceAsync, out: "ClickHouseAsyncMetrics_OSIdleTime"},
+		{in: "asynchronous_metrics", source: MetricSourceAsync, out: "ClickHouseAsyncMetrics_AsynchronousMetrics"},
+
+		// Events metrics
+		{in: "clickhouse_query_count", source: MetricSourceEvents, out: "ClickHouseEvents_QueryCount"},
+		{in: "read_compressed_bytes", source: MetricSourceEvents, out: "ClickHouseEvents_ReadCompressedBytes"},
+
+		// Parts metrics
+		{in: "table_parts_bytes", source: MetricSourceParts, out: "ClickHouseParts_TablePartsBytes"},
+
+		// Disks metrics
+		{in: "clickhouse_total_space_in_bytes", source: MetricSourceDisks, out: "ClickHouseDisks_TotalSpaceInBytes"},
+		{in: "free_space_in_bytes", source: MetricSourceDisks, out: "ClickHouseDisks_FreeSpaceInBytes"},
+
+		// Default metrics (no specific source)
+		{in: "some_unknown_metric", source: MetricSourceDefault, out: "ClickHouseMetrics_SomeUnknownMetric"},
+	}
+
+	for _, tc := range testCases {
+		out := toClickHouseMetricsFormat(tc.in, tc.source)
+		if out != tc.out {
+			t.Fatalf("wrong output for %s from %s: got %s, expected %s", tc.in, tc.source, out, tc.out)
+		}
+	}
+}

@@ -65,7 +65,7 @@ func NewExporter(uri url.URL, insecure bool, user, password string) *Exporter {
 		partsURI:        partsURI.String(),
 		disksMetricURI:  disksMetricURI.String(),
 		scrapeFailures: prometheus.NewCounter(prometheus.CounterOpts{
-			Namespace: namespace,
+			Namespace: "",
 			Name:      "exporter_scrape_failures_total",
 			Help:      "Number of errors while scraping clickhouse.",
 		}),
@@ -103,19 +103,32 @@ func (e *Exporter) Describe(ch chan<- *prometheus.Desc) {
 }
 
 func (e *Exporter) collect(ch chan<- prometheus.Metric) error {
+	// Clear the registry at the start of each collection
+	metricRegistry = make(map[string]bool)
+
 	metrics, err := e.parseKeyValueResponse(e.metricsURI)
 	if err != nil {
 		return fmt.Errorf("error scraping clickhouse url %v: %v", e.metricsURI, err)
 	}
 
 	for _, m := range metrics {
+		name := metricName(m.key, MetricSourceSystem)
+		// Skip if we already processed a metric with this name
+		if _, exists := metricRegistry[name]; exists {
+			continue
+		}
+
 		newMetric := prometheus.NewGaugeVec(prometheus.GaugeOpts{
-			Namespace: namespace,
-			Name:      metricName(m.key),
-			Help:      "Number of " + m.key + " currently processed",
+			// Namespace is already included in the transformed metric name
+			Namespace: "",
+			Name:      name,
+			Help:      "ClickHouse metric: " + m.key,
 		}, []string{}).WithLabelValues()
 		newMetric.Set(m.value)
 		newMetric.Collect(ch)
+
+		// Register this metric name
+		metricRegistry[name] = true
 	}
 
 	asyncMetrics, err := e.parseKeyValueResponse(e.asyncMetricsURI)
@@ -124,13 +137,22 @@ func (e *Exporter) collect(ch chan<- prometheus.Metric) error {
 	}
 
 	for _, am := range asyncMetrics {
+		name := metricName(am.key, MetricSourceAsync)
+		// Skip if we already processed a metric with this name
+		if _, exists := metricRegistry[name]; exists {
+			continue
+		}
+
 		newMetric := prometheus.NewGaugeVec(prometheus.GaugeOpts{
-			Namespace: namespace,
-			Name:      metricName(am.key),
-			Help:      "Number of " + am.key + " async processed",
+			Namespace: "",
+			Name:      name,
+			Help:      "ClickHouse async metric: " + am.key,
 		}, []string{}).WithLabelValues()
 		newMetric.Set(am.value)
 		newMetric.Collect(ch)
+
+		// Register this metric name
+		metricRegistry[name] = true
 	}
 
 	events, err := e.parseKeyValueResponse(e.eventsURI)
@@ -139,12 +161,21 @@ func (e *Exporter) collect(ch chan<- prometheus.Metric) error {
 	}
 
 	for _, ev := range events {
+		name := metricName(ev.key, MetricSourceEvents) + "_total"
+		// Skip if we already processed a metric with this name
+		if _, exists := metricRegistry[name]; exists {
+			continue
+		}
+
 		newMetric, _ := prometheus.NewConstMetric(
 			prometheus.NewDesc(
-				namespace+"_"+metricName(ev.key)+"_total",
-				"Number of "+ev.key+" total processed", []string{}, nil),
+				name,
+				"ClickHouse event metric: "+ev.key, []string{}, nil),
 			prometheus.CounterValue, float64(ev.value))
 		ch <- newMetric
+
+		// Register this metric name
+		metricRegistry[name] = true
 	}
 
 	parts, err := e.parsePartsResponse(e.partsURI)
@@ -152,30 +183,56 @@ func (e *Exporter) collect(ch chan<- prometheus.Metric) error {
 		return fmt.Errorf("error scraping clickhouse url %v: %v", e.partsURI, err)
 	}
 
-	for _, part := range parts {
-		newBytesMetric := prometheus.NewGaugeVec(prometheus.GaugeOpts{
-			Namespace: namespace,
-			Name:      "table_parts_bytes",
-			Help:      "Table size in bytes",
-		}, []string{"database", "table"}).WithLabelValues(part.database, part.table)
-		newBytesMetric.Set(float64(part.bytes))
-		newBytesMetric.Collect(ch)
+	// Since parts metrics have labels, we need a different approach to avoid duplicates
+	// First, register the metric names without collecting them
+	bytesName := metricName("table_parts_bytes", MetricSourceParts)
+	countName := metricName("table_parts_count", MetricSourceParts)
+	rowsName := metricName("table_parts_rows", MetricSourceParts)
 
-		newCountMetric := prometheus.NewGaugeVec(prometheus.GaugeOpts{
-			Namespace: namespace,
-			Name:      "table_parts_count",
-			Help:      "Number of parts of the table",
-		}, []string{"database", "table"}).WithLabelValues(part.database, part.table)
-		newCountMetric.Set(float64(part.parts))
-		newCountMetric.Collect(ch)
+	// Register these names if they haven't been seen yet
+	if _, exists := metricRegistry[bytesName]; !exists {
+		metricRegistry[bytesName] = true
 
-		newRowsMetric := prometheus.NewGaugeVec(prometheus.GaugeOpts{
-			Namespace: namespace,
-			Name:      "table_parts_rows",
-			Help:      "Number of rows in the table",
-		}, []string{"database", "table"}).WithLabelValues(part.database, part.table)
-		newRowsMetric.Set(float64(part.rows))
-		newRowsMetric.Collect(ch)
+		// Now collect the metrics for all parts
+		for _, part := range parts {
+			newBytesMetric := prometheus.NewGaugeVec(prometheus.GaugeOpts{
+				Namespace: "",
+				Name:      bytesName,
+				Help:      "ClickHouse table size in bytes",
+			}, []string{"database", "table"}).WithLabelValues(part.database, part.table)
+			newBytesMetric.Set(float64(part.bytes))
+			newBytesMetric.Collect(ch)
+		}
+	}
+
+	if _, exists := metricRegistry[countName]; !exists {
+		metricRegistry[countName] = true
+
+		// Now collect the metrics for all parts
+		for _, part := range parts {
+			newCountMetric := prometheus.NewGaugeVec(prometheus.GaugeOpts{
+				Namespace: "",
+				Name:      countName,
+				Help:      "ClickHouse number of parts of the table",
+			}, []string{"database", "table"}).WithLabelValues(part.database, part.table)
+			newCountMetric.Set(float64(part.parts))
+			newCountMetric.Collect(ch)
+		}
+	}
+
+	if _, exists := metricRegistry[rowsName]; !exists {
+		metricRegistry[rowsName] = true
+
+		// Now collect the metrics for all parts
+		for _, part := range parts {
+			newRowsMetric := prometheus.NewGaugeVec(prometheus.GaugeOpts{
+				Namespace: "",
+				Name:      rowsName,
+				Help:      "ClickHouse number of rows in the table",
+			}, []string{"database", "table"}).WithLabelValues(part.database, part.table)
+			newRowsMetric.Set(float64(part.rows))
+			newRowsMetric.Collect(ch)
+		}
 	}
 
 	disksMetrics, err := e.parseDiskResponse(e.disksMetricURI)
@@ -183,22 +240,36 @@ func (e *Exporter) collect(ch chan<- prometheus.Metric) error {
 		return fmt.Errorf("error scraping clickhouse url %v: %v", e.disksMetricURI, err)
 	}
 
-	for _, dm := range disksMetrics {
-		newFreeSpaceMetric := prometheus.NewGaugeVec(prometheus.GaugeOpts{
-			Namespace: namespace,
-			Name:      "free_space_in_bytes",
-			Help:      "Disks free_space_in_bytes capacity",
-		}, []string{"disk"}).WithLabelValues(dm.disk)
-		newFreeSpaceMetric.Set(dm.freeSpace)
-		newFreeSpaceMetric.Collect(ch)
+	// Similar approach for disk metrics
+	freeSpaceName := metricName("free_space_in_bytes", MetricSourceDisks)
+	totalSpaceName := metricName("total_space_in_bytes", MetricSourceDisks)
 
-		newTotalSpaceMetric := prometheus.NewGaugeVec(prometheus.GaugeOpts{
-			Namespace: namespace,
-			Name:      "total_space_in_bytes",
-			Help:      "Disks total_space_in_bytes capacity",
-		}, []string{"disk"}).WithLabelValues(dm.disk)
-		newTotalSpaceMetric.Set(dm.totalSpace)
-		newTotalSpaceMetric.Collect(ch)
+	if _, exists := metricRegistry[freeSpaceName]; !exists {
+		metricRegistry[freeSpaceName] = true
+
+		for _, dm := range disksMetrics {
+			newFreeSpaceMetric := prometheus.NewGaugeVec(prometheus.GaugeOpts{
+				Namespace: "",
+				Name:      freeSpaceName,
+				Help:      "ClickHouse disks free space in bytes",
+			}, []string{"disk"}).WithLabelValues(dm.disk)
+			newFreeSpaceMetric.Set(dm.freeSpace)
+			newFreeSpaceMetric.Collect(ch)
+		}
+	}
+
+	if _, exists := metricRegistry[totalSpaceName]; !exists {
+		metricRegistry[totalSpaceName] = true
+
+		for _, dm := range disksMetrics {
+			newTotalSpaceMetric := prometheus.NewGaugeVec(prometheus.GaugeOpts{
+				Namespace: "",
+				Name:      totalSpaceName,
+				Help:      "ClickHouse disks total space in bytes",
+			}, []string{"disk"}).WithLabelValues(dm.disk)
+			newTotalSpaceMetric.Set(dm.totalSpace)
+			newTotalSpaceMetric.Collect(ch)
+		}
 	}
 
 	return nil
@@ -393,9 +464,110 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 
 }
 
-func metricName(in string) string {
+func metricName(in string, source MetricSource) string {
+	// First convert to snake case and replace dots with underscores
 	out := toSnake(in)
-	return strings.Replace(out, ".", "_", -1)
+	out = strings.Replace(out, ".", "_", -1)
+
+	// Then transform to appropriate format based on source
+	transformed := toClickHouseMetricsFormat(out, source)
+
+	// Remove redundant clickhouse_ prefix from final name
+	if strings.HasPrefix(transformed, "clickhouse_") {
+		transformed = transformed[len("clickhouse_"):]
+	}
+
+	return transformed
+}
+
+// MetricSource represents the source table of a ClickHouse metric
+type MetricSource string
+
+const (
+	MetricSourceSystem       MetricSource = "system.metrics"
+	MetricSourceAsync        MetricSource = "system.asynchronous_metrics"
+	MetricSourceEvents       MetricSource = "system.events"
+	MetricSourceParts        MetricSource = "system.parts"
+	MetricSourceDisks        MetricSource = "system.disks"
+	MetricSourceDefault      MetricSource = ""
+)
+
+// MetricRegistry ensures we don't create duplicate metrics with different help texts
+var metricRegistry = make(map[string]bool)
+
+// toClickHouseMetricsFormat converts snake_case metric names to CamelCase format with appropriate prefix
+// Examples:
+// - clickhouse_disk_s3_no_such_key_errors (from system.metrics) -> ClickHouseMetrics_DiskS3NoSuchKeyErrors
+// - clickhouse_tcp_threads (from system.asynchronous_metrics) -> ClickHouseAsyncMetrics_TCPThreads
+// - clickhouse_query_count (from system.events) -> ClickHouseEvents_QueryCount
+func toClickHouseMetricsFormat(in string, source MetricSource) string {
+	// Remove namespace prefix if present
+	if strings.HasPrefix(in, namespace+"_") {
+		in = in[len(namespace)+1:]
+	}
+
+	// Choose prefix based on source
+	var prefix string
+	switch source {
+	case MetricSourceSystem:
+		prefix = "ClickHouseMetrics_"
+	case MetricSourceAsync:
+		prefix = "ClickHouseAsyncMetrics_"
+	case MetricSourceEvents:
+		prefix = "ClickHouseEvents_"
+	case MetricSourceParts:
+		prefix = "ClickHouseParts_"
+	case MetricSourceDisks:
+		prefix = "ClickHouseDisks_"
+	default:
+		prefix = "ClickHouseMetrics_"
+	}
+
+	// Process special metric name patterns
+	// Example: merge_tree_data_select_executor_threads_active -> MergeTreeBackgroundExecutorThreadsActive
+
+	// Special case handling
+	switch {
+	case containsAllParts(in, "merge_tree_data_select_executor_threads_active"):
+		return "ClickHouseMetrics_MergeTreeBackgroundExecutorThreadsActive"
+	// Add more special cases here as needed
+	}
+
+	// Regular processing for other metric names
+	parts := strings.Split(in, "_")
+	for i, part := range parts {
+		if len(part) > 0 {
+			// Handle known compound terms
+			switch {
+			case i < len(parts)-1 && part == "merge" && parts[i+1] == "tree":
+				parts[i] = "MergeTree"
+				parts[i+1] = ""
+				continue
+			case i < len(parts)-1 && part == "back" && parts[i+1] == "ground":
+				parts[i] = "Background"
+				parts[i+1] = ""
+				continue
+			}
+
+			// Handle common acronyms
+			switch strings.ToLower(part) {
+			case "tcp", "ip", "http", "https", "url", "uri", "ssl", "tls", "ssh", "dns", "s3", "io", "os":
+				parts[i] = strings.ToUpper(part)
+			default:
+				parts[i] = strings.ToUpper(part[:1]) + part[1:]
+			}
+		}
+	}
+
+	// Join all parts, filtering out empty ones
+	var result []string
+	for _, part := range parts {
+		if part != "" {
+			result = append(result, part)
+		}
+	}
+
+	return prefix + strings.Join(result, "")
 }
 
 // toSnake convert the given string to snake case following the Golang format:
@@ -413,6 +585,11 @@ func toSnake(in string) string {
 	}
 
 	return string(out)
+}
+
+// Helper function to check if a string contains all parts of another string
+func containsAllParts(s, parts string) bool {
+	return strings.Contains(s, parts)
 }
 
 // check interface
